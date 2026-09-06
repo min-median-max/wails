@@ -66,7 +66,7 @@ static NSWindow<WailsWebviewWindow>* createNativeWindow(int width, int height, b
 		bool squareCorners, double cornerRadius, bool isPanel, struct PanelPreferences panelPreferences,
 		bool isNotchWindow) {
 	NSWindowStyleMask styleMask = windowStyleMask(frameless, squareCorners, cornerRadius);
-	NSRect contentRect = NSMakeRect(0, 0, width-1, height-1);
+	NSRect contentRect = NSMakeRect(0, 0, width, height);
 	if (!isPanel) {
 		return [[WebviewWindow alloc] initWithContentRect:contentRect
 			styleMask:styleMask
@@ -119,7 +119,7 @@ void* windowNew(unsigned int id, int width, int height, bool fraudulentWebsiteWa
 	delegate.windowId = id;
 
 	// Add NSView to window
-	NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width-1, height-1)];
+	NSView* view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
 	[view autorelease];
 
 	[view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
@@ -213,7 +213,7 @@ void* windowNew(unsigned int id, int width, int height, bool fraudulentWebsiteWa
 	[webView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
 	if( enableDragAndDrop ) {
-		WebviewDrag* dragView = [[WebviewDrag alloc] initWithFrame:NSMakeRect(0, 0, width-1, height-1)];
+		WebviewDrag* dragView = [[WebviewDrag alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
 		[dragView autorelease];
 
 		// The mask must be on the drag view itself: it was previously set on
