@@ -289,6 +289,12 @@ func (w *WebviewWindow) markAsDestroyed() {
 	// lock order between it and eventQueueMu is always one-way.
 	w.closeEventQueue()
 
+	// Webviews added to this window die with its content view, and a window
+	// attached to it stops following. Forget both so this package holds nothing
+	// for a window that is gone.
+	w.dropWebviews()
+	w.dropAttachments()
+
 	// Anything parked for this window will never be fetched now. TTL would
 	// eventually reclaim it, but the window is gone, so release immediately.
 	if globalApplication != nil && globalApplication.eventPayloads != nil {
@@ -667,13 +673,32 @@ func (w *WebviewWindow) ExecJS(js string) {
 	w.pendingJSMutex.Lock()
 	if w.runtimeLoaded {
 		w.pendingJSMutex.Unlock()
-		InvokeSync(func() {
-			w.impl.execJS(js)
-		})
+		w.sendJS(js)
 	} else {
 		w.pendingJS = append(w.pendingJS, js)
 		w.pendingJSMutex.Unlock()
 	}
+}
+
+// sendJS runs JavaScript in this window's webview and in every webview added to
+// it. An added webview runs the same runtime and subscribes to the same events,
+// so what the window is sent, each of them is sent.
+//
+// A webview that has not finished loading its runtime drops what arrives before
+// it does. Only the window's own queue is held; an added webview loaded late
+// misses what was sent while it loaded.
+func (w *WebviewWindow) sendJS(js string) {
+	views := w.webviews()
+	// One pass on the main thread. One per view would wait for the run loop once
+	// per view, and every queued event goes through here.
+	InvokeSync(func() {
+		w.impl.execJS(js)
+		for _, added := range views {
+			if added.impl != nil {
+				added.impl.execJS(js)
+			}
+		}
+	})
 }
 
 // Fullscreen sets the window to fullscreen mode. Min/Max size constraints are disabled.
@@ -848,9 +873,7 @@ func (w *WebviewWindow) HandleMessage(message string) {
 		w.pendingJSMutex.Unlock()
 		w.SetResizable(!w.options.DisableResize)
 		for _, js := range pending {
-			InvokeSync(func() {
-				w.impl.execJS(js)
-			})
+			w.sendJS(js)
 		}
 	case strings.HasPrefix(message, "wails:event:emit:"):
 		// Forward an event from a page that can't reach the modern HTTP
@@ -1454,7 +1477,10 @@ func (w *WebviewWindow) DispatchWailsEvent(event *CustomEvent) {
 	// See event_payload_store.go for the measurements.
 	if len(payload) > maxInlineEventPayload {
 		if store := globalApplication.eventPayloads; store != nil {
-			if id, ok := store.put(w.id, []byte(payload)); ok {
+			// One fetch per document in the window: its own page, and one per
+			// webview added to it. Parking it for one would let whichever
+			// fetched first take it from the others.
+			if id, ok := store.put(w.id, []byte(payload), 1+len(w.webviews())); ok {
 				if w.enqueueEventJS(fmt.Sprintf(refEventJS, eventPayloadPath+id)) {
 					return
 				}
@@ -1462,7 +1488,7 @@ func (w *WebviewWindow) DispatchWailsEvent(event *CustomEvent) {
 				// ever fetch this. dropWindow has already run by then and
 				// cannot see it, so reclaim it here rather than leaving it for
 				// the TTL sweep.
-				store.take(id, w.id)
+				store.drop(id)
 				return
 			}
 		}
@@ -1909,9 +1935,9 @@ func (w *WebviewWindow) InitiateFrontendDropProcessing(filenames []string, x int
 	}
 	w.pendingJSMutex.Unlock()
 
-	InvokeSync(func() {
-		w.impl.execJS(jsCall)
-	})
+	// The window's own webview, not every view in the window: the point is in
+	// that view's coordinates and means nothing in another's.
+	InvokeSync(func() { w.impl.execJS(jsCall) })
 }
 
 // HandleDragEnter is called when drag enters the window (Linux only, since GTK intercepts drag events)

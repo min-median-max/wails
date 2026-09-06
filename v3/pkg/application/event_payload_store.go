@@ -77,7 +77,10 @@ func isHexString(s string) bool {
 type parkedEventPayload struct {
 	data     []byte
 	windowID uint
-	created  time.Time
+	// How many documents have still to fetch it. A window holds one document of
+	// its own and one per webview added to it.
+	left    int
+	created time.Time
 }
 
 // eventPayloadStore holds oversized event payloads awaiting a one-shot fetch
@@ -101,7 +104,13 @@ func newEventPayloadStore() *eventPayloadStore {
 
 // put parks a payload and returns its id. ok is false when the store is full,
 // in which case the caller must fall back to inline delivery.
-func (s *eventPayloadStore) put(windowID uint, data []byte) (id string, ok bool) {
+// put parks a payload for one window and returns its id. readers is how many
+// documents will fetch it: a window holds one document of its own and one per
+// webview added to it, and each of them fetches the payload for itself.
+func (s *eventPayloadStore) put(windowID uint, data []byte, readers int) (id string, ok bool) {
+	if readers < 1 {
+		return "", false
+	}
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", false
@@ -119,16 +128,17 @@ func (s *eventPayloadStore) put(windowID uint, data []byte) (id string, ok bool)
 	if s.bytes+len(data) > eventPayloadStoreMaxBytes {
 		return "", false
 	}
-	s.items[id] = parkedEventPayload{data: data, windowID: windowID, created: time.Now()}
+	s.items[id] = parkedEventPayload{data: data, windowID: windowID, left: readers, created: time.Now()}
 	s.bytes += len(data)
 
 	s.janitor.Do(func() { go s.reap() })
 	return id, true
 }
 
-// take returns the payload for id exactly once. windowID must match the window
-// the payload was dispatched to; a zero windowID skips the check, for platforms
-// that do not tag asset requests with a window id.
+// take returns the payload for id, once for each reader it was parked for.
+// windowID must match the window the payload was dispatched to; a zero windowID
+// skips the check, for platforms that do not tag asset requests with a window
+// id.
 func (s *eventPayloadStore) take(id string, windowID uint) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,9 +150,27 @@ func (s *eventPayloadStore) take(id string, windowID uint) ([]byte, bool) {
 	if windowID != 0 && item.windowID != windowID {
 		return nil, false
 	}
+	item.left--
+	if item.left > 0 {
+		s.items[id] = item
+		return item.data, true
+	}
 	delete(s.items, id)
 	s.bytes -= len(item.data)
 	return item.data, true
+}
+
+// drop discards a parked payload whatever it was parked for. The caller that
+// parked it knows nothing will fetch it.
+func (s *eventPayloadStore) drop(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, found := s.items[id]
+	if !found {
+		return
+	}
+	delete(s.items, id)
+	s.bytes -= len(item.data)
 }
 
 // dropWindow discards anything parked for a window that is going away.

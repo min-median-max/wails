@@ -518,6 +518,16 @@ BOOL dispatchKeyEquivalent(NSEvent* event, NSWindow* window) {
     }
     id body = message.body;
     NSString *m = [body isKindOfClass:[NSString class]] ? (NSString *)body : [body description];
+    // A webview added to this window shares this handler, because it is created
+    // from this window's configuration. The runtime it runs reports itself ready
+    // through here, and that report is about the view that sent it: passing on
+    // another view's would make the window announce a runtime its own page has
+    // not loaded. Every other message is the sender's business and is passed on.
+    if ([m isEqualToString:@"wails:runtime:ready"]) {
+        NSWindow<WailsWebviewWindow>* own =
+            (NSWindow<WailsWebviewWindow>*)message.webView.window;
+        if (own != nil && own.webView != message.webView) return;
+    }
     const char *_m = [m UTF8String];
     const char *_origin = origin ? [origin UTF8String] : "";
     processMessage(self.windowId, _m, _origin, message.frameInfo.isMainFrame);
