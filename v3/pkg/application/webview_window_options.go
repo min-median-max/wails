@@ -589,6 +589,14 @@ type MacLiquidGlass struct {
 	GroupSpacing float64
 }
 
+// MacTrafficLightPosition is where the window's own buttons are placed, in
+// points from the window's top left. The zero value leaves them where AppKit
+// puts them.
+type MacTrafficLightPosition struct {
+	X float64
+	Y float64
+}
+
 // MacWindowCornerType controls the corner shape of a frameless macOS window.
 type MacWindowCornerType int
 
@@ -616,6 +624,14 @@ type MacWindow struct {
 	CornerRadius float64
 	// TitleBar contains options for the Mac titlebar
 	TitleBar MacTitleBar
+	// TrafficLightPosition moves the window's close, minimise and zoom buttons so
+	// that the leftmost button's top left corner is this many points from the
+	// window's top left. The zero value leaves them where AppKit puts them.
+	//
+	// The buttons are laid out for a standard title bar. A window that draws its
+	// own bar over a transparent title bar sets this so the buttons sit inside
+	// that bar rather than above it.
+	TrafficLightPosition MacTrafficLightPosition
 	// Appearance is the appearance type for the window
 	Appearance MacAppearanceType
 	// InvisibleTitleBarHeight defines the height of an invisible titlebar which responds to dragging

@@ -14,6 +14,7 @@ package application
 #include "Cocoa/Cocoa.h"
 #import <WebKit/WebKit.h>
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 #import "webview_window_darwin_drag.h"
 
 struct WebviewPreferences {
@@ -290,6 +291,128 @@ void printWindowStyle(void *window) {
 	printf("\n");
 }
 
+
+// SPWindowButtons places a window's own buttons where they were asked to be.
+//
+// The buttons AppKit hands out are laid out for a standard title bar, and AppKit
+// puts them back there whenever the window is laid out again: moving a button, or
+// the view holding it, is undone within the same call. They are moved into a view
+// of our own instead, which AppKit does not lay out. AppKit still gives each
+// button its standard inset inside that view, so the view is placed by that inset
+// rather than by a number written here.
+@interface SPWindowButtons : NSObject
+@property (nonatomic, assign) NSWindow* window;
+@property (nonatomic, assign) NSView* own;
+@property (nonatomic, assign) NSView* home;
+@property (nonatomic) double x;
+@property (nonatomic) double y;
+@property (nonatomic) BOOL placing;
+- (void)place;
+@end
+
+@implementation SPWindowButtons
+
+- (void)place {
+	// Placing changes frames, and a frame change calls this again. One placement
+	// is one pass.
+	if (self.placing) return;
+	NSButton* close = [self.window standardWindowButton:NSWindowCloseButton];
+	NSButton* miniaturise = [self.window standardWindowButton:NSWindowMiniaturizeButton];
+	NSButton* zoom = [self.window standardWindowButton:NSWindowZoomButton];
+	NSView* content = [self.window contentView];
+	if (close == nil || miniaturise == nil || zoom == nil || content == nil) return;
+	self.placing = YES;
+
+	NSView* own = self.own;
+	for (NSButton* button in @[close, miniaturise, zoom]) {
+		if ([button superview] == own) continue;
+		// Where AppKit keeps the buttons, to be given back in full screen.
+		self.home = [button superview];
+		[button removeFromSuperview];
+		[own addSubview:button];
+	}
+
+	// The buttons carry the inset AppKit gave them, so the view is placed to put
+	// the leftmost button's top left corner at x, y from the window's top left.
+	NSRect first = [close frame];
+	NSRect box = [own frame];
+	box.size.width = NSMaxX([zoom frame]) + first.origin.x;
+	box.size.height = NSMaxY(first) + first.origin.y;
+	box.origin.x = self.x - first.origin.x;
+	box.origin.y = [content frame].size.height - self.y - NSMaxY(first);
+	[own setFrame:box];
+
+	self.placing = NO;
+}
+
+// A window in full screen has no title bar of its own, and AppKit takes the
+// buttons back to draw them in the menu bar. It reads them from the title bar, so
+// they are returned before the transition and taken again after it.
+- (void)lendBack:(NSNotification*)note {
+	NSButton* close = [self.window standardWindowButton:NSWindowCloseButton];
+	NSButton* miniaturise = [self.window standardWindowButton:NSWindowMiniaturizeButton];
+	NSButton* zoom = [self.window standardWindowButton:NSWindowZoomButton];
+	if (close == nil || miniaturise == nil || zoom == nil || self.home == nil) return;
+	for (NSButton* button in @[close, miniaturise, zoom]) {
+		[button removeFromSuperview];
+		[self.home addSubview:button];
+	}
+}
+
+- (void)takeBack:(NSNotification*)note {
+	[self place];
+}
+
+- (void)laidOut:(NSNotification*)note {
+	[self place];
+}
+
+- (void)dealloc {
+	[[NSNotificationCenter defaultCenter] removeObserver:self];
+	[super dealloc];
+}
+
+@end
+
+// One placer per window, kept by the window it belongs to.
+static const void* windowButtonsKey = &windowButtonsKey;
+
+// windowSetTrafficLightPosition moves the window's close, minimise and zoom
+// buttons so that the leftmost one's top left corner sits x, y points from the
+// window's top left.
+void windowSetTrafficLightPosition(void* window, double x, double y) {
+	NSWindow* nsWindow = nativeWindow(window);
+	NSView* content = [nsWindow contentView];
+	if ([nsWindow standardWindowButton:NSWindowCloseButton] == nil || content == nil) return;
+
+	SPWindowButtons* placer = objc_getAssociatedObject(nsWindow, windowButtonsKey);
+	if (placer == nil) {
+		placer = [[SPWindowButtons alloc] init];
+		placer.window = nsWindow;
+		NSView* own = [[NSView alloc] initWithFrame:NSZeroRect];
+		// Above the webview, which fills the window when the title bar is not
+		// drawn. A button under it takes no clicks.
+		[content addSubview:own positioned:NSWindowAbove relativeTo:nil];
+		placer.own = own;
+		[own release];
+		objc_setAssociatedObject(nsWindow, windowButtonsKey, placer,
+			OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		[placer release];
+		// The window is laid out again on every resize, and the content view's
+		// height is what the placement is measured from.
+		content.postsFrameChangedNotifications = YES;
+		NSNotificationCenter* centre = [NSNotificationCenter defaultCenter];
+		[centre addObserver:placer selector:@selector(laidOut:)
+			name:NSViewFrameDidChangeNotification object:content];
+		[centre addObserver:placer selector:@selector(lendBack:)
+			name:NSWindowWillEnterFullScreenNotification object:nsWindow];
+		[centre addObserver:placer selector:@selector(takeBack:)
+			name:NSWindowDidExitFullScreenNotification object:nsWindow];
+	}
+	placer.x = x;
+	placer.y = y;
+	[placer place];
+}
 
 // setInvisibleTitleBarHeight sets the invisible title bar height
 void setInvisibleTitleBarHeight(void* window, unsigned int height) {
@@ -1712,6 +1835,14 @@ func (w *macosWebviewWindow) run() {
 			C.windowSetToolbarStyle(w.nsWindow, C.int(titleBarOptions.ToolbarStyle))
 			C.windowSetShowToolbarWhenFullscreen(w.nsWindow, C.bool(titleBarOptions.ShowToolbarWhenFullscreen))
 			C.windowSetHideToolbarSeparator(w.nsWindow, C.bool(titleBarOptions.HideToolbarSeparator))
+		}
+
+		// The buttons are laid out for a standard title bar, so this is applied
+		// after that bar is configured.
+		if macOptions.TrafficLightPosition != (MacTrafficLightPosition{}) {
+			C.windowSetTrafficLightPosition(w.nsWindow,
+				C.double(macOptions.TrafficLightPosition.X),
+				C.double(macOptions.TrafficLightPosition.Y))
 		}
 
 		if macOptions.Appearance != "" {
